@@ -1,0 +1,16 @@
+[project]
+name = "bazarghat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bcrypt==4.0.1",
+    "fastapi>=0.115.13",
+    "fastapi-mail>=1.5.0",
+    "passlib[bcrypt]>=1.7.4",
+    "pyjwt>=2.10.1",
+    "python-dotenv>=1.1.1",
+    "tortoise-orm>=0.25.1",
+    "uvicorn>=0.34.3",
+]
