@@ -1,6 +1,5 @@
 # /home/1.Study/1.ecom_fastapi/bazarghat/main.py
-
-from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks # Added BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks, Depends # Added BackgroundTasks
 from tortoise.contrib.fastapi import register_tortoise
 from models import * # Imports User, Business, Product, and pydantic models
 # Removed 'uvicorn' import as it's not needed when running via `uvicorn main:app`
@@ -20,8 +19,54 @@ from fastapi.templating import Jinja2Templates
 # Email utility
 from email_utils import send_verification_email # Import the specific function
 
+#Authentication
+from authentication import *
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+
+
+
+
 
 app = FastAPI()
+
+
+oauth_to_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+
+
+@app.post("/token")
+async def generate_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    token = await token_generator(form_data.username, form_data.password)##Eikhane ektu dekha dorkar
+    return {"access_token": token, "token_type": "bearer"}
+
+async def get_current_user(token: str = Depends(oauth_to_scheme)) -> User:
+    try:
+        payload = jwt.decode(token, config_credentials["SECRET_KEY"], algorithms=["HS256"])
+        user = await User.get(id=payload.get("id"))
+        return user
+    except:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+
+@app.post("/user/me")
+async def user_login(user=Depends(get_current_user)):
+    business = await Business.get_or_none(owner=user)
+    user_data = await user_pydantic_out.from_tortoise_orm(user)
+    return {
+        "status": "success",
+        "data": {
+            "user": user_data,
+            "email": user.email,
+            "verified": user.is_verified,
+            "joined_on": user.join_data.strftime("%B %d, %Y"),
+        },
+    }
 
 
 # Initialize Jinja2Templates

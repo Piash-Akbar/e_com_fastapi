@@ -8,7 +8,7 @@ from datetime import datetime
 
 class User(Model):
     id = fields.IntField(pk=True, index=True)
-    username = fields.CharField(max_length=20, unique=True, null=False)
+    username = fields.CharField(max_length=200, unique=True, null=False)
     email = fields.CharField(max_length=255, unique=True, null=False)
     password = fields.CharField(max_length=255, null=False)
     is_verified = fields.BooleanField(default=False)
@@ -17,7 +17,7 @@ class User(Model):
 
 class Business(Model):
     id = fields.IntField(pk=True, index=True)
-    businessname = fields.CharField(max_length=20, unique=True, null=False)
+    businessname = fields.CharField(max_length=200, unique=True, null=False)
     city = fields.CharField(max_length=255, null=False, default="unspecified")
     region = fields.CharField(max_length=255, null=False, default="unspecified")
     business_description = fields.TextField(null=True)
@@ -26,7 +26,7 @@ class Business(Model):
 
 class Product(Model):
     id = fields.IntField(pk=True, index=True)
-    product_name = fields.CharField(max_length=20, index=True, null=False)
+    product_name = fields.CharField(max_length=200, index=True, null=False)
     category = fields.CharField(max_length=255, index=True, default="unspecified")
     original_price = fields.DecimalField(max_digits=10, decimal_places=2, null=False)
     new_price = fields.DecimalField(max_digits=10, decimal_places=2)

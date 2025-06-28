@@ -31,3 +31,26 @@ async def verify_token(token: str):
         )
         
     return user
+
+
+async def authenticate_user(username: str, password: str):
+    user = await User.get_or_none(username=username)
+
+    if user and verify_password(password, user.password):
+        return user
+
+    return None
+
+async def token_generator(username: str, password: str):
+    user = await authenticate_user(username, password)
+
+    if user:
+        return jwt.encode({"id": user.id}, config_credentials["SECRET_KEY"], algorithm="HS256")
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    ) 
+
+    
