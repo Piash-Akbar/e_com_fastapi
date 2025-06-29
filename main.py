@@ -35,6 +35,15 @@ import os
 
 app = FastAPI()
 
+#CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ✅ Allow all origins
+    allow_credentials=False,  # ⚠ Must be False when using allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 #upload image after hosting
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
