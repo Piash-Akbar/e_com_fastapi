@@ -30,11 +30,15 @@ import secrets
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-
-
+import os
 
 
 app = FastAPI()
+
+#upload image after hosting
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
 
 
 oauth_to_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -61,12 +65,13 @@ async def get_current_user(token: str = Depends(oauth_to_scheme)) -> User:
         )
 
 
+Hosting_URL = "https://e-com-fastapi.onrender.com/"
 
 @app.post("/user/me")
 async def user_login(user=Depends(get_current_user)):
     business = await Business.get_or_none(owner=user)
     logo = business.logo
-    logo_path = f"http://127.0.0.1:8000/static/images/business/{logo}"
+    logo_path = f"https://e-com-fastapi.onrender.com/static/images/business/{logo}"
     user_data = await user_pydantic_out.from_tortoise_orm(user)
     return {
         "status": "success",
@@ -219,7 +224,7 @@ async def upload_image(file: UploadFile = File(...), current_user: User = Depend
     else:
         raise HTTPException(status_code=400, detail="You are not the owner of this business")
 
-    file_url = f"http://127.0.0.1:8000/static/images/business/{token_name_img}"
+    file_url = f"https://e-com-fastapi.onrender.com/static/images/business/{token_name_img}"
     return {
         "status": "success","filename": file_url,
         "message": "Image uploaded successfully"
@@ -271,7 +276,7 @@ async def upload_product_image(
     product.product_image = token_name_img
     await product.save()
 
-    file_url = f"http://127.0.0.1:8000/static/images/products/{token_name_img}"
+    file_url = f"https://e-com-fastapi.onrender.com/static/images/products/{token_name_img}"
     return {
         "status": "success",
         "filename": file_url,
@@ -327,7 +332,7 @@ async def get_product(product_id: int):
                 "city": business.city,
                 "region": business.region,
                 "description": business.business_description,
-                "logo": f"http://127.0.0.1:8000/static/images/business/{business.logo}",
+                "logo": f"https://e-com-fastapi.onrender.com/static/images/business/{business.logo}",
                 "email": owner.email,
                 "joined_on": owner.join_data.strftime("%B %d, %Y")
             }
@@ -347,7 +352,80 @@ async def delete_product(product_id: int, current_user: User = Depends(get_curre
     else:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized to delete this product")
     
+#Update products
+@app.put("/products/{product_id}")
+async def update_product(
+    product_id: int,
+    product: product_pydantic_in,
+    current_user: User = Depends(get_current_user)
+):
+    product_data = product.dict(exclude_unset=True)
 
+    # Retrieve the current user's business
+    business = await Business.get_or_none(owner=current_user)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    # Get the product from the database
+    product_in_db = await Product.get_or_none(id=product_id).prefetch_related("business")
+    if not product_in_db:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Check if the product belongs to the user's business
+    if product_in_db.business_id != business.id:
+        raise HTTPException(status_code=403, detail="Unauthorized to update this product")
+
+    # Avoid division by zero when calculating discount
+    if 'original_price' in product_data and 'new_price' in product_data and product_data['original_price'] > 0:
+        product_data['percentage_discount'] = round((product_data['new_price'] / product_data['original_price']) * 100)
+    elif 'original_price' in product_data:
+        product_data['percentage_discount'] = 0
+
+    # Update the product (excluding changing the business)
+    await Product.filter(id=product_id).update(**product_data)
+
+    # Fetch and return updated product
+    updated_product = await Product.get(id=product_id)
+    product_out = await product_pydantic.from_tortoise_orm(updated_product)
+
+    return {"status": "success", "data": product_out}
+
+
+#Get all businesses
+@app.get("/business/")
+async def get_businesses():
+    response = await business_pydantic.from_queryset(Business.all())
+    return {"status": "success", "data": response}
+
+#Delete business
+@app.delete("/business/{business_id}")
+async def delete_business(business_id: int, current_user: User = Depends(get_current_user)):
+    business = await Business.get_or_none(id=business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if business.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized to delete this business")
+    await business.delete()
+    return {"status": "success", "message": f"Business {business_id} deleted successfully"}
+
+
+#Update business
+@app.put("/business/{business_id}")
+async def update_business(
+    business_id: int,
+    business: business_pydantic_in,
+    current_user: User = Depends(get_current_user)
+):
+    business_data = business.dict(exclude_unset=True)
+    business = await Business.get_or_none(id=business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if business.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized to update this business")
+    await Business.filter(id=business_id).update(**business_data)
+    updated_business = await Business.get(id=business_id)
+    business_out = await business_pydantic.from_tortoise_orm(updated_business)
+    return {"status": "success", "data": business_out}
 
 
 
