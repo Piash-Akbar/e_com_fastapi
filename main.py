@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
 
 app = FastAPI()
