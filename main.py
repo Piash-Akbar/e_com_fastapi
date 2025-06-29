@@ -1,4 +1,5 @@
 # /home/1.Study/1.ecom_fastapi/bazarghat/main.py
+from fileinput import filename
 from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks, Depends # Added BackgroundTasks
 from tortoise.contrib.fastapi import register_tortoise
 from models import * # Imports User, Business, Product, and pydantic models
@@ -23,6 +24,12 @@ from email_utils import send_verification_email # Import the specific function
 from authentication import *
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 
+#image upload
+from fastapi import UploadFile, File, Form
+import secrets
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+
 
 
 
@@ -32,7 +39,8 @@ app = FastAPI()
 
 oauth_to_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-
+#Static Files setup config
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.post("/token")
@@ -57,6 +65,8 @@ async def get_current_user(token: str = Depends(oauth_to_scheme)) -> User:
 @app.post("/user/me")
 async def user_login(user=Depends(get_current_user)):
     business = await Business.get_or_none(owner=user)
+    logo = business.logo
+    logo_path = f"http://127.0.0.1:8000/static/images/business/{logo}"
     user_data = await user_pydantic_out.from_tortoise_orm(user)
     return {
         "status": "success",
@@ -65,6 +75,7 @@ async def user_login(user=Depends(get_current_user)):
             "email": user.email,
             "verified": user.is_verified,
             "joined_on": user.join_data.strftime("%B %d, %Y"),
+            "logo": logo_path
         },
     }
 
@@ -174,6 +185,171 @@ async def root():
     Basic root endpoint.
     """
     return {"message": "Hello World"}
+
+@app.post("/uploadfiles/profile")
+async def upload_image(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    
+    FILE_PATH = "static/images/business"
+    filename = file.filename
+
+    extension = filename.split(".")[-1]
+    
+    if extension not in ["jpg", "jpeg", "png", "gif"]:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    
+    token_name_img = secrets.token_hex(10) + "." + extension
+    generated_img_name = FILE_PATH + "/" + token_name_img
+    file_content = await file.read()
+    with open(generated_img_name, "wb") as f:
+        f.write(file_content)
+
+    #Pillow
+    img = Image.open(generated_img_name)
+    img = img.resize((400, 400))
+    img.save(generated_img_name)
+    
+    f.close()
+
+    business = await Business.get_or_none(owner=current_user)
+    owner = await business.owner
+
+    if owner == current_user:
+        business.logo = token_name_img
+        await business.save()
+    else:
+        raise HTTPException(status_code=400, detail="You are not the owner of this business")
+
+    file_url = f"http://127.0.0.1:8000/static/images/business/{token_name_img}"
+    return {
+        "status": "success","filename": file_url,
+        "message": "Image uploaded successfully"
+        } 
+
+@app.post("/uploadfiles/product/{product_id}")
+async def upload_product_image(
+    product_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    FILE_PATH = "static/images/products"
+    filename = file.filename
+
+    extension = filename.split(".")[-1]
+    if extension not in ["jpg", "jpeg", "png", "gif"]:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
+    token_name_img = secrets.token_hex(10) + "." + extension
+    generated_img_name = f"{FILE_PATH}/{token_name_img}"
+
+    file_content = await file.read()
+    with open(generated_img_name, "wb") as f:
+        f.write(file_content)
+
+    # Pillow
+    img = Image.open(generated_img_name)
+    img = img.resize((400, 400))
+    img.save(generated_img_name)
+
+    # Fetch product and validate ownership
+    product = await Product.get_or_none(id=product_id).prefetch_related("business")
+
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    business = await product.business  # only use await if it's a relation
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found for this product")
+
+    owner = await business.owner
+    if owner.id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to update this product"
+        )
+
+    # Save image reference
+    product.product_image = token_name_img
+    await product.save()
+
+    file_url = f"http://127.0.0.1:8000/static/images/products/{token_name_img}"
+    return {
+        "status": "success",
+        "filename": file_url,
+        "message": "Image uploaded successfully"
+    }
+
+
+#CRUD Operations
+@app.post("/products/")
+async def create_product(product: product_pydantic_in, current_user: User = Depends(get_current_user)):
+    product = product.dict(exclude_unset=True)
+
+    # Retrieve business associated with the current user
+    business = await Business.get_or_none(owner=current_user)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    # Avoid division by zero
+    if product['original_price'] > 0:
+        product['percentage_discount'] = round((product['new_price'] / product['original_price']) * 100)
+    else:
+        product['percentage_discount'] = 0
+
+    # Create product and assign the correct business object
+    product_obj = await Product.create(**product, business=business)
+    product_obj = await product_pydantic.from_tortoise_orm(product_obj)
+
+    return {"status": "success", "data": product_obj}
+
+
+#Get all products
+@app.get("/products/")
+async def get_products():
+    response = await product_pydantic.from_queryset(Product.all())
+    return {"status": "success", "data": response}
+
+#Get a specific product
+@app.get("/products/{product_id}")
+async def get_product(product_id: int):
+    product = await Product.get_or_none(id=product_id)
+    business = await product.business
+    owner = await business.owner
+    response = await product_pydantic.from_queryset_single(Product.get(id=product_id))
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return {
+        "status": "success",
+        "data": {
+            "product_details": response,
+            "business_details": {
+                "business_name": business.businessname,
+                "owner_name": owner.username,
+                "city": business.city,
+                "region": business.region,
+                "description": business.business_description,
+                "logo": f"http://127.0.0.1:8000/static/images/business/{business.logo}",
+                "email": owner.email,
+                "joined_on": owner.join_data.strftime("%B %d, %Y")
+            }
+        }
+    }
+
+#delete a product
+@app.delete("/products/{product_id}")
+async def delete_product(product_id: int, current_user: User = Depends(get_current_user)):
+    product = await Product.get_or_none(id=product_id)
+    business = await product.business
+    owner = await business.owner
+
+    if current_user == owner:
+        await product.delete()
+        return {"status": "success", "message": f"Product {product_id} deleted successfully"}
+    else:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized to delete this product")
+    
+
+
+
 
 
 # --- Tortoise-ORM Initialization ---

@@ -5,10 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "aiofiles>=24.1.0",
     "bcrypt==4.0.1",
     "fastapi>=0.115.13",
     "fastapi-mail>=1.5.0",
     "passlib[bcrypt]>=1.7.4",
+    "pillow>=11.2.1",
     "pyjwt>=2.10.1",
     "python-dotenv>=1.1.1",
     "python-multipart>=0.0.20",
