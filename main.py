@@ -277,7 +277,7 @@ async def upload_product_image(
     product.product_image = token_name_img
     await product.save(update_fields=["product_image"])  # update only specific field
 
-    file_url = f"http://127.0.0.1:8000/static/images/products/{token_name_img}"
+    file_url = f"http://e-com-fastapi.onrender.com/static/images/products/{token_name_img}"
     return {
         "status": "success",
         "filename": file_url,
