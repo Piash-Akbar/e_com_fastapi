@@ -108,7 +108,7 @@ async def send_verification_email(email_to: EmailStr, instance: User):
             <div class="container">
                 <h1>Account Verification</h1>
                 <p>Click the button below to verify your account:</p>
-                <a href="http://localhost:8000/verify/{token}" class="button">Verify Account</a>
+                <a href="https://e-com-fastapi.onrender.com/verify/{token}" class="button">Verify Account</a>
             </div>
         </body>
         </html>
