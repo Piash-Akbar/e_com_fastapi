@@ -260,38 +260,30 @@ async def upload_product_image(
     with open(generated_img_name, "wb") as f:
         f.write(file_content)
 
-    # Pillow
+    # Resize the image using Pillow
     img = Image.open(generated_img_name)
     img = img.resize((400, 400))
     img.save(generated_img_name)
 
-    # Fetch product and validate ownership
-    product = await Product.get_or_none(id=product_id).prefetch_related("business")
-
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    business = await product.business  # only use await if it's a relation
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found for this product")
-
+    # Get full product object
+    product = await Product.get(id=product_id).prefetch_related("business")
+    business = await product.business
     owner = await business.owner
+
     if owner.id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to update this product"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="You are not authorized to update this product")
 
-    # Save image reference
+    # Update the image field
     product.product_image = token_name_img
-    await product.save()
+    await product.save(update_fields=["product_image"])  # update only specific field
 
-    file_url = f"https://e-com-fastapi.onrender.com/static/images/products/{token_name_img}"
+    file_url = f"http://127.0.0.1:8000/static/images/products/{token_name_img}"
     return {
         "status": "success",
         "filename": file_url,
         "message": "Image uploaded successfully"
     }
+
 
 
 #CRUD Operations
