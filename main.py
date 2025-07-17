@@ -1,65 +1,59 @@
-# /home/1.Study/1.ecom_fastapi/bazarghat/main.py
-from fileinput import filename
-from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks, Depends # Added BackgroundTasks
-from tortoise.contrib.fastapi import register_tortoise
-from models import * # Imports User, Business, Product, and pydantic models
-# Removed 'uvicorn' import as it's not needed when running via `uvicorn main:app`
-from authentication import verify_token, get_password_hash # Assuming authentication.py exists
-
-# Signals
-from tortoise.signals import post_save
-from typing import List, Optional, Type
-from tortoise import BaseDBAsyncClient
-
-# Response classes
+# Organized FastAPI App with Tags and Routers
+from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks, Depends, UploadFile, File
 from fastapi.responses import HTMLResponse
-
-# Templates
 from fastapi.templating import Jinja2Templates
-
-# Email utility
-from email_utils import send_verification_email # Import the specific function
-
-#Authentication
-from authentication import *
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-
-#image upload
-from fastapi import UploadFile, File, Form
-import secrets
-from fastapi.staticfiles import StaticFiles
-from PIL import Image
-
-import os
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from tortoise.contrib.fastapi import register_tortoise
+from tortoise.signals import post_save
+from tortoise import BaseDBAsyncClient
+from typing import List, Optional, Type
 
-app = FastAPI()
+from PIL import Image
+import os
+import secrets
 
-#CORS
+from models import *
+from authentication import verify_token, get_password_hash, token_generator
+from email_utils import send_verification_email
+
+app = FastAPI(
+    title="E-Commerce API",
+    description="API for authentication, product management, and business operations",
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Authentication", "description": "User registration, login, and verification."},
+        {"name": "Business", "description": "Manage business profiles and ownership."},
+        {"name": "Products", "description": "CRUD operations for products."},
+        {"name": "Uploads", "description": "Image uploads for profile and products."},
+        {"name": "Users", "description": "Admin-level user queries."},
+    ]
+)
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ✅ Allow all origins
-    allow_credentials=False,  # ⚠ Must be False when using allow_origins=["*"]
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-#upload image after hosting
+# Static files
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
-
-
+# Auth scheme
 oauth_to_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-#Static Files setup config
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Templates
+templates = Jinja2Templates(directory="templates")
 
-
-@app.post("/token")
+@app.post("/token", tags=["Authentication"])
 async def generate_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    token = await token_generator(form_data.username, form_data.password)##Eikhane ektu dekha dorkar
+    token = await token_generator(form_data.username, form_data.password)
     return {"access_token": token, "token_type": "bearer"}
 
 async def get_current_user(token: str = Depends(oauth_to_scheme)) -> User:
@@ -74,10 +68,34 @@ async def get_current_user(token: str = Depends(oauth_to_scheme)) -> User:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+@app.post("/users/", tags=["Authentication"])
+async def create_user(user: user_pydantic_in, background_tasks: BackgroundTasks):
+    user_info = user.dict(exclude_unset=True)
+    user_info["password"] = get_password_hash(user_info["password"])
 
-Hosting_URL = "https://e-com-fastapi.onrender.com/"
+    if await User.get_or_none(email=user_info["email"]):
+        raise HTTPException(status_code=409, detail="User with this email already exists.")
+    if await User.get_or_none(username=user_info["username"]):
+        raise HTTPException(status_code=409, detail="User with this username already exists.")
 
-@app.post("/user/me")
+    user_obj = await User.create(**user_info)
+    new_user = await user_pydantic_out.from_tortoise_orm(user_obj)
+
+    background_tasks.add_task(send_verification_email, email_to=new_user.email, instance=user_obj)
+    return {"status": "success", "data": f"Thanks for choosing {new_user.username}, check your email to verify your account"}
+
+@app.get("/verify/{token}", response_class=HTMLResponse, tags=["Authentication"])
+async def verify_user(request: Request, token: str):
+    user = await verify_token(token)
+    if user and not user.is_verified:
+        user.is_verified = True
+        await user.save()
+        return templates.TemplateResponse("verify.html", {"request": request, "username": user.username, "message": "Account verified successfully!"})
+    elif user and user.is_verified:
+        return templates.TemplateResponse("verify.html", {"request": request, "username": user.username, "message": "Account already verified."})
+    raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+@app.post("/user/me", tags=["Authentication"])
 async def user_login(user=Depends(get_current_user)):
     business = await Business.get_or_none(owner=user)
     logo = business.logo
@@ -91,243 +109,91 @@ async def user_login(user=Depends(get_current_user)):
             "verified": user.is_verified,
             "joined_on": user.join_data.strftime("%B %d, %Y"),
             "logo": logo_path
-        },
+        }
     }
 
-
-# Initialize Jinja2Templates
-templates = Jinja2Templates(directory="templates")
-
-
-# --- Tortoise-ORM Signal Handlers ---
-
-@post_save(User)
-async def create_business_and_send_verification_email( # Renamed for clarity
-    sender: Type[User],
-    instance: User,
-    created: bool,
-    using_db: "Optional[BaseDBAsyncClient]",
-    update_fields: List[str]
-) -> None:
-    """
-    Tortoise-ORM signal handler that runs after a User is saved.
-    If a new user is created, it creates a corresponding business
-    and sends a verification email.
-    """
-    if created:
-        # Create a business for the new user
-        business_obj = await Business.create(businessname=instance.username, owner=instance)
-        # Convert to pydantic model (optional, but good for consistent data structure)
-        # Note: This line might not be strictly necessary if you're just creating,
-        # not immediately returning or processing the pydantic representation.
-        await business_pydantic.from_tortoise_orm(business_obj)
-
-        # Send verification email for the new user
-        # Signals run within the app's event loop, so awaiting directly here is fine.
-        await send_verification_email(email_to=instance.email, instance=instance)
-
-
-# --- API Endpoints ---
-
-@app.post("/users/", status_code=status.HTTP_201_CREATED) # Add status code for creation
-async def create_user(user: user_pydantic_in, background_tasks: BackgroundTasks):
-    """
-    Registers a new user and sends a verification email in the background.
-    """
-    user_info = user.dict(exclude_unset=True)
-    user_info["password"] = get_password_hash(user_info["password"])
-    
-    # Check if user with email or username already exists to provide better feedback
-    existing_user = await User.get_or_none(email=user_info["email"])
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists."
-        )
-    existing_user = await User.get_or_none(username=user_info["username"])
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this username already exists."
-        )
-
-    user_obj = await User.create(**user_info)
-    new_user = await user_pydantic_out.from_tortoise_orm(user_obj) # Use user_pydantic_out for response
-
-    # Add email sending to background tasks for non-blocking execution
-    background_tasks.add_task(send_verification_email, email_to=new_user.email, instance=user_obj)
-
-    return {
-        "status" : "success",
-        "data" : f"Thanks for choosing {new_user.username}, check your email to verify your account"
-    }
-
-
-@app.get("/verify/{token}", response_class=HTMLResponse)
-async def verify_user(request: Request, token: str):
-    """
-    Verifies a user's account using a token from the verification email.
-    """
-    # Assuming verify_token decodes the token and returns the User object or None/raises error
-    user = await verify_token(token) # Your verify_token needs to retrieve the user from DB
-
-    if user and not user.is_verified:
-        user.is_verified = True
-        await user.save()
-        # Return a success HTML page
-        return templates.TemplateResponse(
-            "verify.html",
-            {"request": request, "username": user.username, "message": "Account verified successfully!"}
-        )
-    elif user and user.is_verified:
-        # User is already verified
-        return templates.TemplateResponse(
-            "verify.html",
-            {"request": request, "username": user.username, "message": "Account already verified."}
-        )
-    
-    # If user is None (token invalid/expired) or other issues
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials or token is invalid/expired.",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
-@app.get("/")
-async def root():
-    """
-    Basic root endpoint.
-    """
-    return {"message": "Hello World"}
-
-@app.post("/uploadfiles/profile")
+@app.post("/uploadfiles/profile", tags=["Uploads"])
 async def upload_image(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
-    
     FILE_PATH = "static/images/business"
-    filename = file.filename
-
-    extension = filename.split(".")[-1]
-    
-    if extension not in ["jpg", "jpeg", "png", "gif"]:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-    
-    token_name_img = secrets.token_hex(10) + "." + extension
-    generated_img_name = FILE_PATH + "/" + token_name_img
-    file_content = await file.read()
-    with open(generated_img_name, "wb") as f:
-        f.write(file_content)
-
-    #Pillow
-    img = Image.open(generated_img_name)
-    img = img.resize((400, 400))
-    img.save(generated_img_name)
-    
-    f.close()
-
-    business = await Business.get_or_none(owner=current_user)
-    owner = await business.owner
-
-    if owner == current_user:
-        business.logo = token_name_img
-        await business.save()
-    else:
-        raise HTTPException(status_code=400, detail="You are not the owner of this business")
-
-    file_url = f"https://e-com-fastapi.onrender.com/static/images/business/{token_name_img}"
-    return {
-        "status": "success","filename": file_url,
-        "message": "Image uploaded successfully"
-        } 
-
-@app.post("/uploadfiles/product/{product_id}")
-async def upload_product_image(
-    product_id: int,
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
-    FILE_PATH = "static/images/products"
-    filename = file.filename
-
-    extension = filename.split(".")[-1]
+    extension = file.filename.split(".")[-1]
     if extension not in ["jpg", "jpeg", "png", "gif"]:
         raise HTTPException(status_code=400, detail="Invalid file type")
 
     token_name_img = secrets.token_hex(10) + "." + extension
     generated_img_name = f"{FILE_PATH}/{token_name_img}"
-
-    file_content = await file.read()
     with open(generated_img_name, "wb") as f:
-        f.write(file_content)
+        f.write(await file.read())
 
-    # Resize the image using Pillow
-    img = Image.open(generated_img_name)
-    img = img.resize((400, 400))
+    img = Image.open(generated_img_name).resize((400, 400))
     img.save(generated_img_name)
 
-    # Get full product object
-    product = await Product.get(id=product_id).prefetch_related("business")
-    business = await product.business
-    owner = await business.owner
+    business = await Business.get_or_none(owner=current_user)
+    if await business.owner != current_user:
+        raise HTTPException(status_code=400, detail="You are not the owner of this business")
 
-    if owner.id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="You are not authorized to update this product")
+    business.logo = token_name_img
+    await business.save()
 
-    # Update the image field
-    product.product_image = token_name_img
-    await product.save(update_fields=["product_image"])  # update only specific field
-
-    file_url = f"http://e-com-fastapi.onrender.com/static/images/products/{token_name_img}"
     return {
         "status": "success",
-        "filename": file_url,
+        "filename": f"https://e-com-fastapi.onrender.com/static/images/business/{token_name_img}",
         "message": "Image uploaded successfully"
     }
 
+@app.post("/uploadfiles/product/{product_id}", tags=["Uploads"])
+async def upload_product_image(product_id: int, file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    FILE_PATH = "static/images/products"
+    extension = file.filename.split(".")[-1]
+    if extension not in ["jpg", "jpeg", "png", "gif"]:
+        raise HTTPException(status_code=400, detail="Invalid file type")
 
+    token_name_img = secrets.token_hex(10) + "." + extension
+    generated_img_name = f"{FILE_PATH}/{token_name_img}"
+    with open(generated_img_name, "wb") as f:
+        f.write(await file.read())
 
-#CRUD Operations
-@app.post("/products/")
+    img = Image.open(generated_img_name).resize((400, 400))
+    img.save(generated_img_name)
+
+    product = await Product.get(id=product_id).prefetch_related("business")
+    if (await product.business).owner.id != current_user.id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    product.product_image = token_name_img
+    await product.save(update_fields=["product_image"])
+
+    return {
+        "status": "success",
+        "filename": f"https://e-com-fastapi.onrender.com/static/images/products/{token_name_img}",
+        "message": "Image uploaded successfully"
+    }
+
+@app.post("/products/", tags=["Products"])
 async def create_product(product: product_pydantic_in, current_user: User = Depends(get_current_user)):
     product = product.dict(exclude_unset=True)
-
-    # Retrieve business associated with the current user
     business = await Business.get_or_none(owner=current_user)
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
-    # Avoid division by zero
-    if product['original_price'] > 0:
-        product['percentage_discount'] = round((product['new_price'] / product['original_price']) * 100)
-    else:
-        product['percentage_discount'] = 0
-
-    # Create product and assign the correct business object
+    product['percentage_discount'] = round((product['new_price'] / product['original_price']) * 100) if product['original_price'] > 0 else 0
     product_obj = await Product.create(**product, business=business)
-    product_obj = await product_pydantic.from_tortoise_orm(product_obj)
+    return {"status": "success", "data": await product_pydantic.from_tortoise_orm(product_obj)}
 
-    return {"status": "success", "data": product_obj}
-
-
-#Get all products
-@app.get("/products/")
+@app.get("/products/", tags=["Products"])
 async def get_products():
-    response = await product_pydantic.from_queryset(Product.all())
-    return {"status": "success", "data": response}
+    return {"status": "success", "data": await product_pydantic.from_queryset(Product.all())}
 
-#Get a specific product
-@app.get("/products/{product_id}")
+@app.get("/products/{product_id}", tags=["Products"])
 async def get_product(product_id: int):
     product = await Product.get_or_none(id=product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
     business = await product.business
     owner = await business.owner
-    response = await product_pydantic.from_queryset_single(Product.get(id=product_id))
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
     return {
         "status": "success",
         "data": {
-            "product_details": response,
+            "product_details": await product_pydantic.from_queryset_single(Product.get(id=product_id)),
             "business_details": {
                 "business_name": business.businessname,
                 "owner_name": owner.username,
@@ -341,103 +207,71 @@ async def get_product(product_id: int):
         }
     }
 
-#delete a product
-@app.delete("/products/{product_id}")
+@app.delete("/products/{product_id}", tags=["Products"])
 async def delete_product(product_id: int, current_user: User = Depends(get_current_user)):
     product = await Product.get_or_none(id=product_id)
-    business = await product.business
-    owner = await business.owner
+    if await (await product.business).owner != current_user:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    await product.delete()
+    return {"status": "success", "message": f"Product {product_id} deleted successfully"}
 
-    if current_user == owner:
-        await product.delete()
-        return {"status": "success", "message": f"Product {product_id} deleted successfully"}
-    else:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not authorized to delete this product")
-    
-#Update products
-@app.put("/products/{product_id}")
-async def update_product(
-    product_id: int,
-    product: product_pydantic_in,
-    current_user: User = Depends(get_current_user)
-):
+@app.put("/products/{product_id}", tags=["Products"])
+async def update_product(product_id: int, product: product_pydantic_in, current_user: User = Depends(get_current_user)):
     product_data = product.dict(exclude_unset=True)
-
-    # Retrieve the current user's business
     business = await Business.get_or_none(owner=current_user)
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
-
-    # Get the product from the database
     product_in_db = await Product.get_or_none(id=product_id).prefetch_related("business")
-    if not product_in_db:
-        raise HTTPException(status_code=404, detail="Product not found")
 
-    # Check if the product belongs to the user's business
-    if product_in_db.business_id != business.id:
-        raise HTTPException(status_code=403, detail="Unauthorized to update this product")
+    if not product_in_db or product_in_db.business_id != business.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
-    # Avoid division by zero when calculating discount
-    if 'original_price' in product_data and 'new_price' in product_data and product_data['original_price'] > 0:
+    if 'original_price' in product_data and 'new_price' in product_data:
         product_data['percentage_discount'] = round((product_data['new_price'] / product_data['original_price']) * 100)
-    elif 'original_price' in product_data:
-        product_data['percentage_discount'] = 0
 
-    # Update the product (excluding changing the business)
     await Product.filter(id=product_id).update(**product_data)
+    return {"status": "success", "data": await product_pydantic.from_tortoise_orm(await Product.get(id=product_id))}
 
-    # Fetch and return updated product
-    updated_product = await Product.get(id=product_id)
-    product_out = await product_pydantic.from_tortoise_orm(updated_product)
-
-    return {"status": "success", "data": product_out}
-
-
-#Get all businesses
-@app.get("/business/")
+@app.get("/business/", tags=["Business"])
 async def get_businesses():
-    response = await business_pydantic.from_queryset(Business.all())
-    return {"status": "success", "data": response}
+    return {"status": "success", "data": await business_pydantic.from_queryset(Business.all())}
 
-#Delete business
-@app.delete("/business/{business_id}")
+@app.delete("/business/{business_id}", tags=["Business"])
 async def delete_business(business_id: int, current_user: User = Depends(get_current_user)):
     business = await Business.get_or_none(id=business_id)
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
-    if business.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Unauthorized to delete this business")
+    if not business or business.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
     await business.delete()
     return {"status": "success", "message": f"Business {business_id} deleted successfully"}
 
+@app.put("/business/{business_id}", tags=["Business"])
+async def update_business(business_id: int, business: business_pydantic_in, current_user: User = Depends(get_current_user)):
+    data = business.dict(exclude_unset=True)
+    biz = await Business.get_or_none(id=business_id)
+    if not biz or biz.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    await Business.filter(id=business_id).update(**data)
+    return {"status": "success", "data": await business_pydantic.from_tortoise_orm(await Business.get(id=business_id))}
 
-#Update business
-@app.put("/business/{business_id}")
-async def update_business(
-    business_id: int,
-    business: business_pydantic_in,
-    current_user: User = Depends(get_current_user)
-):
-    business_data = business.dict(exclude_unset=True)
-    business = await Business.get_or_none(id=business_id)
-    if not business:
-        raise HTTPException(status_code=404, detail="Business not found")
-    if business.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Unauthorized to update this business")
-    await Business.filter(id=business_id).update(**business_data)
-    updated_business = await Business.get(id=business_id)
-    business_out = await business_pydantic.from_tortoise_orm(updated_business)
-    return {"status": "success", "data": business_out}
+@app.get("/", tags=["Root"])
+async def root():
+    return {"message": "Hello World"}
 
+@app.get("/users/", tags=["Users"])
+async def get_users():
+    return {"status": "success", "data": await user_pydantic.from_queryset(User.all())}
 
-
-
-# --- Tortoise-ORM Initialization ---
+@post_save(User)
+async def create_business_and_send_verification_email(sender: Type[User], instance: User, created: bool, using_db: Optional[BaseDBAsyncClient], update_fields: List[str]) -> None:
+    if created:
+        business_obj = await Business.create(businessname=instance.username, owner=instance)
+        await business_pydantic.from_tortoise_orm(business_obj)
+        await send_verification_email(email_to=instance.email, instance=instance)
 
 register_tortoise(
     app,
     db_url="sqlite://db.sqlite3",
-    modules={"models": ["models"]}, # Assumes models.py is in the same directory
-    generate_schemas=True, # Will create tables if they don't exist
+    modules={"models": ["models"]},
+    generate_schemas=True,
     add_exception_handlers=True,
 )
+
+
